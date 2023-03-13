@@ -16,6 +16,8 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 */
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace MemReportParser
@@ -23,7 +25,7 @@ namespace MemReportParser
     class Entry
     {
         public string Name { get; private set; }
-        public long Value { get; private set; }
+        public long Value { get; private set; } // Num of bytes
 
         public Entry(string name, long value)
         {
@@ -37,27 +39,15 @@ namespace MemReportParser
         public List<Entry> Entries { get; private set; }
         public List<long> Diffs { get; private set; }
         public List<long> BaseLine { get; private set; }
-        public long Sum { get; private set; }
+        public long Avg { get => (long)BaseLine.Average(); }
         public long Min { get; private set; }
         public long Max { get; private set; }
-        public long Trend
-        {
-            get
-            {
-                if( Entries.Count>=2)
-                {
-                    return (Entries[Entries.Count-1].Value - Entries[0].Value) / Entries.Count;
-                }
-                return 0;
-            }
-        }
 
         public EntryHistory()
         {
             Entries = new List<Entry>();
             Diffs = new List<long>();
             BaseLine = new List<long>();
-            Sum = 0;
             Min = long.MaxValue;
             Max = long.MinValue;
         }
@@ -67,16 +57,16 @@ namespace MemReportParser
             long diff = 0;
             if (Entries.Count == 0)
             {
-                diff = e.Value; ;
+                diff = 0;
             }
             else
             {
                 diff = e.Value - Entries[Entries.Count - 1].Value;
             }
+
             Entries.Add(e);
             Diffs.Add(diff);
-            BaseLine.Add(e.Value - Entries[0].Value);
-            Sum += diff;
+            BaseLine.Add(e.Value);
             Min = Math.Min(Min, e.Value);
             Max = Math.Max(Max, e.Value);
         }
@@ -85,29 +75,32 @@ namespace MemReportParser
     class ValueEntry
     {
         public string Name { get; private set; }
-        public int Count {  get { return m_Entries.Count; } }
-        List<Entry> m_Entries;
+        private Dictionary<string, Entry> m_Entries;
 
         public ValueEntry(string name)
         {
             Name = name;
-            m_Entries = new List<Entry>();
+            m_Entries = new Dictionary<string, Entry>();
         }
 
-        public void Add(string name, long value)
+        public void Add(string fileName, long value)
         {
-            m_Entries.Add(new Entry(name, value));
+            if (!m_Entries.ContainsKey(fileName))
+            {
+                m_Entries[fileName] = new Entry(fileName, value);
+            }
+            else
+            {
+                m_Entries[fileName] = new Entry(fileName, value + m_Entries[fileName].Value);
+            }
         }
 
-        public EntryHistory Diff()
+        public EntryHistory GatherHistory()
         {
             EntryHistory result = new EntryHistory();
-            if (m_Entries.Count > 1)
+            foreach (var Val in m_Entries.Values)
             {
-                for (int i = 1; i < m_Entries.Count; ++i)
-                {
-                    result.Add(m_Entries[i]);
-                }
+                result.Add(Val);
             }
             return result;
         }
@@ -125,7 +118,6 @@ namespace MemReportParser
             PERSISTENT_LEVEL,
             BINNED_ALLOCATOR_STATS,
             POOL_STATS,
-            // Pooled Render Targets:
             POOLED_RENDER_TARGETS,
             TEXTURE_LIST
         }
@@ -147,13 +139,13 @@ namespace MemReportParser
             return trimmedWords.ToArray();
         }
 
-        static void AddEntry(Dictionary<string, ValueEntry> dict, string name, string key, long value)
+        static void AddEntry(Dictionary<string, ValueEntry> dict, string fileName, string key, long value)
         {
             if (!dict.ContainsKey(key))
             {
                 dict[key] = new ValueEntry(key);
             }
-            dict[key].Add(name, value);
+            dict[key].Add(fileName, value);
         }
 
         static Dictionary<string, ValueEntry> GetStatDict(Dictionary<string, Dictionary<string, ValueEntry>> statDict, string name)
@@ -220,14 +212,19 @@ namespace MemReportParser
             }
         }
 
-        enum StatType
+        struct OutputSettings
         {
-            VALUE,
-            DIFF,
-            BASELINE
+            public bool bCalcStats;
+            public StreamWriter writer;
+
+            public OutputSettings(bool _bCalcStats, StreamWriter _writer)
+            {
+                bCalcStats = _bCalcStats;
+                writer = _writer;
+            }
         }
 
-        static void OutputStats(Dictionary<string, ValueEntry> dict, string header, StatType type)
+        static void OutputStats(Dictionary<string, ValueEntry> dict, string header, OutputSettings outpuSettings)
         {
             int columnCount = 0;
             StringBuilder sb = new StringBuilder();
@@ -235,67 +232,60 @@ namespace MemReportParser
             foreach (var e in dict)
             {
                 ValueEntry ve = e.Value;
-                EntryHistory hist = ve.Diff();
-                sb.Append(string.Format("{0}, {1}, {2}, {3}, {4}", e.Value.Name, hist.Min, hist.Max, hist.Sum, hist.Trend));
-                switch (type)
+                EntryHistory hist = ve.GatherHistory();
+
+                if (outpuSettings.bCalcStats)
                 {
-                    case StatType.BASELINE:
-                        columnCount = Math.Max(columnCount, hist.BaseLine.Count);
-                        foreach (var d in hist.BaseLine)
-                        {
-                            sb.Append(string.Format(", {0}", d));
-                        }
-                        break;
-
-                    case StatType.DIFF:
-                        columnCount = Math.Max(columnCount, hist.Diffs.Count);
-                        foreach (var d in hist.Diffs)
-                        {
-                            sb.Append(string.Format(", {0}", d));
-                        }
-                        break;
-
-                    case StatType.VALUE:
-                        columnCount = Math.Max(columnCount, hist.Entries.Count);
-                        foreach (var d in hist.Entries)
-                        {
-                            sb.Append(string.Format(", {0}", d.Value));
-                        }
-                        break;
+                    sb.Append(string.Format("{0},{1},{2},{3}", e.Value.Name, hist.Min, hist.Max, hist.Avg));
                 }
+                else
+                {
+                    sb.Append(string.Format("{0}", e.Value.Name));
+                }
+
+                {
+                    columnCount = Math.Max(columnCount, hist.BaseLine.Count);
+                    foreach (var d in hist.BaseLine)
+                    {
+                        sb.Append(string.Format(",{0}", d));
+                    }
+                }
+
                 sb.AppendLine();
             }
 
-            sbh.AppendLine("");
-            sbh.AppendLine(string.Format("{0},{1}", header, type));
-            sbh.Append(string.Format("Name, Min, Max, Sum, Trend, Base[0]"));
-            switch (type)
+            if (outpuSettings.writer == null)
             {
-                case StatType.VALUE:
-                    for (int iCol = 1; iCol < columnCount; ++iCol)
-                    {
-                        sbh.Append(string.Format(",Val[{0}]", iCol));
-                    }
-                    break;
+                sbh.Append(string.Format("{0}\n", header));
+            }
 
-                case StatType.DIFF:
-                    for (int iCol = 1; iCol < columnCount; ++iCol)
-                    {
-                        sbh.Append(string.Format(",{0} -> {1}", iCol - 1, iCol));
-                    }
-                    break;
+            if (outpuSettings.bCalcStats)
+            {
+                sbh.Append(string.Format("Name,Min,Max,Avg"));
+            }
+            else
+            {
+                sbh.Append(string.Format("Name"));
+            }
 
-                case StatType.BASELINE:
-                    for (int iCol = 1; iCol < columnCount; ++iCol)
-                    {
-                        sbh.Append(string.Format(",0 -> {1}", iCol));
-                    }
-                    break;
+            {
+                for (int iCol = 0; iCol < columnCount; ++iCol)
+                {
+                    sbh.Append(string.Format(",Val{0}", iCol));
+                }
             }
             sbh.AppendLine("");
 
-            Console.Write(sbh.ToString());
-            Console.WriteLine(sb.ToString());
+            if (outpuSettings.writer != null)
+            {
+                outpuSettings.writer.Write(sbh.ToString());
+                outpuSettings.writer.WriteLine(sb.ToString());
+            }
+            else
+            {
+                Console.Write(sbh.ToString());
+                Console.WriteLine(sb.ToString());
+            }
         }
 
 
@@ -359,8 +349,18 @@ namespace MemReportParser
             ArgParserLite argParser = new ArgParserLite(args);
             string memReportPath = argParser.GetValue("-i", null);
             string searchPattern = argParser.GetValue("-p", null);
-            string statType = argParser.GetValue("-s", "value");
-            bool printHelp = argParser.GetOption("-h") || string.IsNullOrEmpty(memReportPath) || string.IsNullOrEmpty(searchPattern);
+            if (string.IsNullOrEmpty(searchPattern))
+            {
+                searchPattern = "*.memreport";
+            }
+            string outputDir = argParser.GetValue("-o", null);
+            if (string.IsNullOrEmpty(outputDir))
+            {
+                outputDir = Directory.GetCurrentDirectory();
+            }
+            bool bCalcStats = argParser.GetOption("-stat", false);
+
+            bool printHelp = argParser.GetOption("-h") || string.IsNullOrEmpty(memReportPath);
             if (printHelp)
             {
                 Console.WriteLine("Parse UE4 MemReport files to see memory usage over time. For instance do a MemReport on");
@@ -374,24 +374,32 @@ namespace MemReportParser
                 Console.WriteLine("");
                 Console.WriteLine("  -p <pattern>    File pattern to search for, can contain wildcards.");
                 Console.WriteLine("                  test-*.memreport");
-                Console.WriteLine("");
-                Console.WriteLine("  -s <stat type>  Type of statistic to output");
-                Console.WriteLine("                  value - print out the actual value");
-                Console.WriteLine("                  diff - print out the change in value from report to report");
-                Console.WriteLine("                  baseline - print out the change in value from the first report");
+                Console.WriteLine("  -o <output directory> Specify the path where we output the csv.");
+                Console.WriteLine("  -stat           Calculate Min,Max,Avg and output them to csv along side values.");
                 Console.WriteLine("");
                 return;
             }
- 
-            Dictionary<string, ValueEntry> activeobjectStats = null;
-            Dictionary<string, Dictionary<string, ValueEntry>> allStats = new Dictionary<string, Dictionary<string, ValueEntry>>();
 
             string[] files = System.IO.Directory.GetFiles(memReportPath, searchPattern);
             Array.Sort(files, (a, b) => string.Compare(a, b));
+
+            {
+                Console.WriteLine("Launch!");
+                Console.WriteLine(string.Format("Reading file pattern : {0}", searchPattern));
+                foreach (string file in files)
+                {
+                    string fileName = System.IO.Path.GetFileNameWithoutExtension(file);
+                    Console.WriteLine(string.Format("Processing File: {0} - {1}", fileName, file));
+                }
+                Console.WriteLine(string.Format("Output csv to dir : {0}", outputDir));
+            }
+
+            Dictionary<string, ValueEntry> activeobjectStats = null;
+            Dictionary<string, Dictionary<string, ValueEntry>> allStats = new Dictionary<string, Dictionary<string, ValueEntry>>();
+
             foreach ( string file in files)
             {
                 string fileName = System.IO.Path.GetFileNameWithoutExtension(file);
-                //Console.WriteLine(string.Format("File: {0} - {1}", fileName, file));
                 string[] lines = System.IO.File.ReadAllLines(file);
                 ParseState state = ParseState.SEARCHING;
                 foreach( string line in lines)
@@ -780,24 +788,21 @@ namespace MemReportParser
             }
 
             {
-                StatType type = StatType.VALUE;
-                switch(statType.ToLower())
-                {
-                    default:
-                    case "value": type = StatType.VALUE; break;
-                    case "diff": type = StatType.DIFF; break;
-                    case "baseline": type = StatType.BASELINE; break;
-                }
-
                 foreach (var entry in allStats)
                 {
                     Dictionary<string, ValueEntry> dict = entry.Value;
                     string key = entry.Key;
-                    OutputStats(dict, key, type);
+                    string outputPath = Path.Combine(outputDir, string.Format("{0}.csv", key.Replace(" ", "_")));
+                    Console.WriteLine(string.Format("Output to : {0}", outputPath));
+
+                    using (var writer = new StreamWriter(outputPath, append:false, encoding: Encoding.UTF8))
+                    {
+                        OutputStats(dict, key, new OutputSettings(bCalcStats, writer));
+                    }
                 }
             }
 
-            Console.WriteLine();
+            Console.WriteLine("Finished!");
         }
     }
 }
