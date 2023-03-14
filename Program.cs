@@ -37,38 +37,18 @@ namespace MemReportParser
     class EntryHistory
     {
         public List<Entry> Entries { get; private set; }
-        public List<long> Diffs { get; private set; }
         public List<long> BaseLine { get; private set; }
-        public long Avg { get => (long)BaseLine.Average(); }
-        public long Min { get; private set; }
-        public long Max { get; private set; }
 
         public EntryHistory()
         {
             Entries = new List<Entry>();
-            Diffs = new List<long>();
             BaseLine = new List<long>();
-            Min = long.MaxValue;
-            Max = long.MinValue;
         }
 
         public void Add(Entry e)
         {
-            long diff = 0;
-            if (Entries.Count == 0)
-            {
-                diff = 0;
-            }
-            else
-            {
-                diff = e.Value - Entries[Entries.Count - 1].Value;
-            }
-
             Entries.Add(e);
-            Diffs.Add(diff);
             BaseLine.Add(e.Value);
-            Min = Math.Min(Min, e.Value);
-            Max = Math.Max(Max, e.Value);
         }
     }
 
@@ -214,12 +194,10 @@ namespace MemReportParser
 
         struct OutputSettings
         {
-            public bool bCalcStats;
             public StreamWriter writer;
 
-            public OutputSettings(bool _bCalcStats, StreamWriter _writer)
+            public OutputSettings(StreamWriter _writer)
             {
-                bCalcStats = _bCalcStats;
                 writer = _writer;
             }
         }
@@ -234,14 +212,7 @@ namespace MemReportParser
                 ValueEntry ve = e.Value;
                 EntryHistory hist = ve.GatherHistory();
 
-                if (outpuSettings.bCalcStats)
-                {
-                    sb.Append(string.Format("{0},{1},{2},{3}", e.Value.Name, hist.Min, hist.Max, hist.Avg));
-                }
-                else
-                {
-                    sb.Append(string.Format("{0}", e.Value.Name));
-                }
+                sb.Append(string.Format("{0}", e.Value.Name));
 
                 {
                     columnCount = Math.Max(columnCount, hist.BaseLine.Count);
@@ -259,14 +230,7 @@ namespace MemReportParser
                 sbh.Append(string.Format("{0}\n", header));
             }
 
-            if (outpuSettings.bCalcStats)
-            {
-                sbh.Append(string.Format("Name,Min,Max,Avg"));
-            }
-            else
-            {
-                sbh.Append(string.Format("Name"));
-            }
+            sbh.Append(string.Format("Name"));
 
             {
                 for (int iCol = 0; iCol < columnCount; ++iCol)
@@ -358,7 +322,7 @@ namespace MemReportParser
             {
                 outputDir = Directory.GetCurrentDirectory();
             }
-            bool bCalcStats = argParser.GetOption("-stat", false);
+            bool bCalcCountInsteadOfBytes = argParser.GetOption("-count", false);
 
             bool printHelp = argParser.GetOption("-h") || string.IsNullOrEmpty(memReportPath);
             if (printHelp)
@@ -375,7 +339,7 @@ namespace MemReportParser
                 Console.WriteLine("  -p <pattern>    File pattern to search for, can contain wildcards.");
                 Console.WriteLine("                  test-*.memreport");
                 Console.WriteLine("  -o <output directory> Specify the path where we output the csv.");
-                Console.WriteLine("  -stat           Calculate Min,Max,Avg and output them to csv along side values.");
+                Console.WriteLine("  -count          Ouput UObject and persistent object count instead of Bytes");
                 Console.WriteLine("");
                 return;
             }
@@ -397,6 +361,12 @@ namespace MemReportParser
             Dictionary<string, ValueEntry> activeobjectStats = null;
             Dictionary<string, Dictionary<string, ValueEntry>> allStats = new Dictionary<string, Dictionary<string, ValueEntry>>();
 
+            string class_suffix = " Bytes";
+            if (bCalcCountInsteadOfBytes)
+            {
+                class_suffix = " Count";
+            }
+
             foreach ( string file in files)
             {
                 string fileName = System.IO.Path.GetFileNameWithoutExtension(file);
@@ -410,7 +380,7 @@ namespace MemReportParser
                     //Obj List: class=StaticMesh
                     //Obj List: class=Level
                     if (line.Contains("Obj List:"))
-                    {
+                    {                        
                         string className = "";
                         if (line.Contains("class="))
                         {
@@ -420,7 +390,7 @@ namespace MemReportParser
                         {
                             default:
                                 state = ParseState.OBJECT_CLASS_LIST;
-                                activeobjectStats = GetStatDict(allStats, "Object Classes");
+                                activeobjectStats = GetStatDict(allStats, "Object Classes" + class_suffix);
                                 break;
                             case "SoundWave":
                                 state = ParseState.OBJECT_LIST;
@@ -700,12 +670,25 @@ namespace MemReportParser
                                     string[] words = SplitAndTrim(line, ' ');
                                     if (words.Length == 10)
                                     {
-                                        long count;
-                                        if (long.TryParse(words[1], out count))
+                                        if (bCalcCountInsteadOfBytes)
                                         {
-                                            string key = words[0];
-                                            long value = count;
-                                            AddEntry(activeobjectStats, fileName, key, value);
+                                            long count;
+                                            if (long.TryParse(words[1], out count))
+                                            {
+                                                string key = words[0];
+                                                long value = count;
+                                                AddEntry(activeobjectStats, fileName, key, value);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            float numKB;
+                                            if (float.TryParse(words[2], out numKB))
+                                            {
+                                                string key = words[0];
+                                                long value = (long)(numKB * 1024.0f);
+                                                AddEntry(activeobjectStats, fileName, key, value);
+                                            }
                                         }
                                     }
                                 }
@@ -728,7 +711,7 @@ namespace MemReportParser
                                         if (float.TryParse(words[2], out numKB))
                                         {
                                             string key = words[1];
-                                            long value = (long)(numKB * 1024.0f * 1024.0f);
+                                            long value = (long)(numKB * 1024.0f);
                                             AddEntry(activeobjectStats, fileName, key, value);
                                         }
                                     }
@@ -774,12 +757,16 @@ namespace MemReportParser
 
                         case ParseState.PERSISTENT_LEVEL:
                             {
-                                string[] words = SplitAndTrim(line, ',');
-                                if (words.Length == 6)
+                                // Skip persistent level on not generting by COUNT as persistent level only has usage counts
+                                if (bCalcCountInsteadOfBytes)
                                 {
-                                    string key = words[4];
-                                    long value = 1;
-                                    AddEntry(GetStatDict(allStats, "Persistent"), fileName, key, value);
+                                    string[] words = SplitAndTrim(line, ',');
+                                    if (words.Length == 6)
+                                    {
+                                        string key = words[4];
+                                        long value = 1;
+                                        AddEntry(GetStatDict(allStats, "Persistent" + class_suffix), fileName, key, value);
+                                    }
                                 }
                             }
                             break;
@@ -797,7 +784,7 @@ namespace MemReportParser
 
                     using (var writer = new StreamWriter(outputPath, append:false, encoding: Encoding.UTF8))
                     {
-                        OutputStats(dict, key, new OutputSettings(bCalcStats, writer));
+                        OutputStats(dict, key, new OutputSettings(writer));
                     }
                 }
             }
