@@ -91,6 +91,7 @@ namespace MemReportParser
         enum ParseState
         {
             SEARCHING,
+            PLATFORM_MEMORY_STAT,
             MEMORY_STATS,
             OBJECT_CLASS_LIST,
             OBJECT_LIST,
@@ -374,12 +375,16 @@ namespace MemReportParser
                 ParseState state = ParseState.SEARCHING;
                 foreach( string line in lines)
                 {
+                    if (line.Contains("Platform Memory Stats"))
+                    {
+                        state = ParseState.PLATFORM_MEMORY_STAT;
+                    }
                     //Obj List:
                     //Obj List: class=SoundWave
                     //Obj List: class=SkeletalMesh
                     //Obj List: class=StaticMesh
                     //Obj List: class=Level
-                    if (line.Contains("Obj List:"))
+                    else if (line.Contains("Obj List:"))
                     {                        
                         string className = "";
                         if (line.Contains("class="))
@@ -442,6 +447,36 @@ namespace MemReportParser
                     switch (state)
                     {
                         case ParseState.SEARCHING:
+                            break;
+
+                        case ParseState.PLATFORM_MEMORY_STAT:
+                            {
+                                if (string.IsNullOrEmpty(line))
+                                {
+                                    state = ParseState.SEARCHING;
+                                    continue;
+                                }
+                                if (line.StartsWith("Platform Memory Stats"))
+                                {
+                                    continue;
+                                }
+                                /*
+                                    *  Process Physical Memory: 2680.35 MB used, 2721.03 MB peak
+                                    Process Virtual Memory: 0.00 MB used, 0.00 MB peak
+                                    Physical Memory: 6872.75 MB used,  4727.86 MB free, 11600.61 MB total
+                                    Virtual Memory: 743.50 MB used,  5400.50 MB free, 6144.00 MB total
+                                    */
+                                var key = line.Substring(0, line.IndexOf(':'));
+                                foreach (var str in line.Split(' '))
+                                {
+                                    if (float.TryParse(str, out float valueMB))
+                                    {
+                                        long value = (long)(valueMB * 1024 * 1024);
+                                        AddEntry(GetStatDict(allStats, "Platform Memory Stats"), fileName, key, value);
+                                        break;
+                                    }
+                                }
+                            }
                             break;
 
                         case ParseState.TEXTURE_LIST:
